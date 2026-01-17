@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HoloRay Motion-Tracked Annotations</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="https://unpkg.com/lucide@latest" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header class="app__header">
+      <div class="header__row">
+        <div class="header__title">
+          <span class="icon" data-lucide="video"></span>
+          <h1>HoloRay Motion-Tracked Annotations</h1>
+        </div>
+        <div class="badge">
+          <span class="icon" data-lucide="users"></span>
+          <span id="connectedCount">1 connected</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="app__main">
+      <aside class="sidebar">
+        <div class="section">
+          <h3>Video Source</h3>
+          <label class="upload-label">
+            <input id="videoInput" type="file" accept="video/*" hidden>
+            <button class="btn btn--primary" type="button" id="uploadButton">
+              <span class="icon" data-lucide="upload"></span>
+              Upload Medical Video
+            </button>
+          </label>
+        </div>
+
+        <div class="section">
+          <h3>Annotation Tools</h3>
+          <div class="tool-grid">
+            <button class="tool-btn active" data-tool="pen" type="button">
+              <span class="icon" data-lucide="pencil"></span>
+              <span>Pen</span>
+            </button>
+            <button class="tool-btn" data-tool="rectangle" type="button">
+              <span class="icon" data-lucide="square"></span>
+              <span>Box</span>
+            </button>
+            <button class="tool-btn" data-tool="circle" type="button">
+              <span class="icon" data-lucide="circle"></span>
+              <span>Circle</span>
+            </button>
+            <button class="tool-btn" data-tool="text" type="button" disabled>
+              <span class="icon" data-lucide="type"></span>
+              <span>Text</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="section">
+          <h3>Color</h3>
+          <div class="colors">
+            <button class="swatch active" data-color="#FF0000" style="background:#FF0000"></button>
+            <button class="swatch" data-color="#00FF00" style="background:#00FF00"></button>
+            <button class="swatch" data-color="#0066FF" style="background:#0066FF"></button>
+            <button class="swatch" data-color="#FFFF00" style="background:#FFFF00"></button>
+            <button class="swatch" data-color="#FF00FF" style="background:#FF00FF"></button>
+            <button class="swatch" data-color="#00FFFF" style="background:#00FFFF"></button>
+          </div>
+        </div>
+
+        <div class="section">
+          <h3>Motion Tracking</h3>
+          <div class="stack">
+            <button class="btn" id="trackingToggle" type="button">
+              <span class="icon" data-lucide="unlock"></span>
+              <span id="trackingLabel">Tracking Active (demo)</span>
+            </button>
+            <button class="btn" id="trackingReset" type="button">
+              <span class="icon" data-lucide="refresh-cw"></span>
+              Reinitialize (visual)
+            </button>
+          </div>
+        </div>
+
+        <div class="section stack">
+          <button class="btn btn--danger" id="clearAll" type="button">
+            <span class="icon" data-lucide="trash-2"></span>
+            Clear All
+          </button>
+          <div class="divider"></div>
+          <h3>Tracking Status</h3>
+          <div class="legend">
+            <div class="legend__item">
+              <span class="legend__chip"></span>
+              <span>Active tracking</span>
+            </div>
+            <div class="legend__item">
+              <span class="legend__chip legend__chip--warn"></span>
+              <span>Uncertain</span>
+            </div>
+            <div class="legend__item">
+              <span class="legend__chip legend__chip--danger"></span>
+              <span>Tracking lost</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <section class="stage">
+        <div class="stage__frame">
+          <div id="placeholder" class="placeholder">
+            <svg width="70" height="70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M23 7l-7 5 7 5V7z"/>
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+            </svg>
+            <p>Upload a medical video to begin</p>
+            <p class="muted">Supports ultrasound, echo, laparoscopy, IVUS, and more</p>
+          </div>
+
+          <div id="canvasWrap" class="canvas-wrapper hidden">
+            <video id="video" class="video-el" preload="metadata"></video>
+            <canvas id="overlay" class="overlay"></canvas>
+            <canvas id="hiddenCanvas" class="hidden-canvas"></canvas>
+            <div class="controls">
+              <button id="playPause" class="control-btn" type="button">Play</button>
+              <span class="control-label" id="annotationCount">0 annotations</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      if (window.lucide && typeof window.lucide.createIcons === 'function') {
+        window.lucide.createIcons();
+      }
+
+      const state = {
+        annotations: [],
+        current: null,
+        drawing: false,
+        selectedTool: 'pen',
+        color: '#FF0000',
+        isPlaying: false,
+        trackingEnabled: true,
+      };
+
+      const trackingData = new Map();
+      let rafId = null;
+      const TRACK_SCALE = 0.5; // downscale for faster SSD
+      const TRACK_INTERVAL_MS = 60; // throttle tracking to ~16 fps
+      let lastTrackTs = 0;
+
+      const videoInput = document.getElementById('videoInput');
+      const uploadButton = document.getElementById('uploadButton');
+      const placeholder = document.getElementById('placeholder');
+      const canvasWrap = document.getElementById('canvasWrap');
+      const video = document.getElementById('video');
+      const overlay = document.getElementById('overlay');
+      const overlayCtx = overlay.getContext('2d');
+      const hiddenCanvas = document.getElementById('hiddenCanvas');
+      const hiddenCtx = hiddenCanvas.getContext('2d');
+      const playPause = document.getElementById('playPause');
+      const annotationCount = document.getElementById('annotationCount');
+      const clearAll = document.getElementById('clearAll');
+      const trackingToggle = document.getElementById('trackingToggle');
+      const trackingLabel = document.getElementById('trackingLabel');
+      const trackingReset = document.getElementById('trackingReset');
+
+      const setCanvasSize = () => {
+        const width = video.videoWidth || 960;
+        const height = video.videoHeight || 540;
+        overlay.width = width;
+        overlay.height = height;
+        overlay.style.width = width + 'px';
+        overlay.style.height = height + 'px';
+        hiddenCanvas.width = Math.max(1, Math.floor(width * TRACK_SCALE));
+        hiddenCanvas.height = Math.max(1, Math.floor(height * TRACK_SCALE));
+      };
+
+      const updateCount = () => {
+        const count = state.annotations.length;
+        annotationCount.textContent = count + ' annotation' + (count === 1 ? '' : 's');
+      };
+
+      const setTool = (tool) => {
+        state.selectedTool = tool;
+        document.querySelectorAll('.tool-btn').forEach(btn => {
+          btn.classList.toggle('active', btn.dataset.tool === tool);
+        });
+      };
+
+      const setColor = (value) => {
+        state.color = value;
+        document.querySelectorAll('.swatch').forEach(swatch => {
+          swatch.classList.toggle('active', swatch.dataset.color === value);
+        });
+      };
+
+      const getPos = (event) => {
+        const rect = overlay.getBoundingClientRect();
+        const scaleX = overlay.width / rect.width;
+        const scaleY = overlay.height / rect.height;
+        return {
+          x: (event.clientX - rect.left) * scaleX,
+          y: (event.clientY - rect.top) * scaleY,
+        };
+      };
+
+      const drawShape = (ctx, annotation) => {
+        ctx.save();
+        ctx.strokeStyle = annotation.color;
+        ctx.fillStyle = annotation.color;
+        ctx.lineWidth = 3;
+        if (annotation.type === 'path') {
+          ctx.beginPath();
+          const [first, ...rest] = annotation.points;
+          ctx.moveTo(first.x, first.y);
+          rest.forEach(p => ctx.lineTo(p.x, p.y));
+          ctx.stroke();
+        } else if (annotation.type === 'rectangle') {
+          ctx.strokeRect(annotation.x, annotation.y, annotation.width, annotation.height);
+        } else if (annotation.type === 'circle') {
+          ctx.beginPath();
+          ctx.arc(annotation.x, annotation.y, annotation.radius, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      };
+
+      const render = () => {
+        overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+        state.annotations.forEach(ann => drawShape(overlayCtx, ann));
+        if (state.current) drawShape(overlayCtx, state.current);
+      };
+
+      const computeSSD = (template, current) => {
+        let sum = 0;
+        const len = Math.min(template.length, current.length);
+        for (let i = 0; i < len; i += 4) {
+          const dr = template[i] - current[i];
+          const dg = template[i + 1] - current[i + 1];
+          const db = template[i + 2] - current[i + 2];
+          sum += dr * dr + dg * dg + db * db;
+        }
+        return sum / (len / 4 || 1);
+      };
+
+      const initializeTracking = (annotation) => {
+        if (!video.videoWidth || !hiddenCtx) return null;
+        hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+        const regionSize = 48; // smaller template to improve speed
+        const sx = Math.max(0, Math.floor(((annotation.x || 0) * TRACK_SCALE) - regionSize / 2));
+        const sy = Math.max(0, Math.floor(((annotation.y || 0) * TRACK_SCALE) - regionSize / 2));
+        const w = Math.min(regionSize, hiddenCanvas.width - sx);
+        const h = Math.min(regionSize, hiddenCanvas.height - sy);
+        const region = hiddenCtx.getImageData(sx, sy, w, h);
+        return {
+          id: annotation.id,
+          lastPosition: { x: (annotation.x || 0) * TRACK_SCALE, y: (annotation.y || 0) * TRACK_SCALE },
+          templateRegion: region,
+          confidence: 1,
+          lostFrames: 0,
+        };
+      };
+
+      const trackAnnotation = (tracking) => {
+        if (!tracking || !tracking.templateRegion || !video.videoWidth) return tracking;
+        hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+        const template = tracking.templateRegion;
+        const tw = template.width;
+        const th = template.height;
+        const searchRadius = 28; // tighter window to reduce lag
+        let best = { score: Infinity, x: tracking.lastPosition.x, y: tracking.lastPosition.y };
+        const startX = Math.max(0, Math.floor(tracking.lastPosition.x - searchRadius));
+        const startY = Math.max(0, Math.floor(tracking.lastPosition.y - searchRadius));
+        const endX = Math.min(hiddenCanvas.width - tw, Math.floor(tracking.lastPosition.x + searchRadius));
+        const endY = Math.min(hiddenCanvas.height - th, Math.floor(tracking.lastPosition.y + searchRadius));
+        for (let y = startY; y < endY; y += 3) {
+          for (let x = startX; x < endX; x += 3) {
+            const current = hiddenCtx.getImageData(x, y, tw, th);
+            const score = computeSSD(template.data, current.data);
+            if (score < best.score) {
+              best = { score, x: x + tw / 2, y: y + th / 2 };
+            }
+          }
+        }
+        const confidence = Math.max(0, 1 - best.score / 1000000);
+        const moved = Math.abs(best.x - tracking.lastPosition.x) > 1.5 || Math.abs(best.y - tracking.lastPosition.y) > 1.5;
+        if (confidence > 0.3 && moved) {
+          return { ...tracking, lastPosition: { x: best.x, y: best.y }, confidence, lostFrames: 0 };
+        }
+        if (confidence < 0.3) {
+          return { ...tracking, confidence, lostFrames: tracking.lostFrames + 1 };
+        }
+        return tracking;
+      };
+
+      const applyTracking = () => {
+        state.annotations = state.annotations.map((ann) => {
+          const track = trackingData.get(ann.id);
+          if (!state.trackingEnabled || !track) return ann;
+          const updated = trackAnnotation(track);
+          trackingData.set(ann.id, updated);
+          if (updated.lostFrames > 30) return { ...ann, trackingStatus: 'lost' };
+          if (updated.confidence < 0.5) return { ...ann, trackingStatus: 'uncertain' };
+          const dx = (updated.lastPosition.x / TRACK_SCALE) - (ann.x || 0);
+          const dy = (updated.lastPosition.y / TRACK_SCALE) - (ann.y || 0);
+          if (ann.type === 'path') {
+            return {
+              ...ann,
+              x: updated.lastPosition.x / TRACK_SCALE,
+              y: updated.lastPosition.y / TRACK_SCALE,
+              points: ann.points.map(p => ({ x: p.x + dx, y: p.y + dy })),
+              trackingStatus: 'active',
+            };
+          }
+          return { ...ann, x: updated.lastPosition.x / TRACK_SCALE, y: updated.lastPosition.y / TRACK_SCALE, trackingStatus: 'active' };
+        });
+      };
+
+      const loop = () => {
+        const now = performance.now();
+        if (state.isPlaying && state.trackingEnabled && !video.paused && !video.ended) {
+          if (now - lastTrackTs >= TRACK_INTERVAL_MS) {
+            applyTracking();
+            render();
+            lastTrackTs = now;
+          }
+        }
+        rafId = requestAnimationFrame(loop);
+      };
+
+      const startDraw = (event) => {
+        if (!state.selectedTool) return;
+        state.drawing = true;
+        const { x, y } = getPos(event);
+        if (state.selectedTool === 'pen') {
+          state.current = { type: 'path', points: [{ x, y }], color: state.color };
+        } else if (state.selectedTool === 'rectangle') {
+          state.current = { type: 'rectangle', x, y, width: 0, height: 0, color: state.color };
+        } else if (state.selectedTool === 'circle') {
+          state.current = { type: 'circle', x, y, radius: 0, color: state.color };
+        }
+        render();
+      };
+
+      const moveDraw = (event) => {
+        if (!state.drawing || !state.current) return;
+        const { x, y } = getPos(event);
+        if (state.current.type === 'path') {
+          state.current.points.push({ x, y });
+        } else if (state.current.type === 'rectangle') {
+          state.current.width = x - state.current.x;
+          state.current.height = y - state.current.y;
+        } else if (state.current.type === 'circle') {
+          const dx = x - state.current.x;
+          const dy = y - state.current.y;
+          state.current.radius = Math.sqrt(dx * dx + dy * dy);
+        }
+        render();
+      };
+
+      const endDraw = () => {
+        if (!state.drawing || !state.current) return;
+        state.drawing = false;
+        const withId = { ...state.current, id: Date.now() };
+        state.annotations.push(withId);
+        if (state.trackingEnabled) {
+          const tracking = initializeTracking(withId);
+          if (tracking) trackingData.set(withId.id, tracking);
+        }
+        state.current = null;
+        updateCount();
+        render();
+      };
+
+      uploadButton.addEventListener('click', () => videoInput.click());
+      videoInput.addEventListener('change', (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+        const url = URL.createObjectURL(file);
+        video.src = url;
+        video.load();
+        placeholder.classList.add('hidden');
+        canvasWrap.classList.remove('hidden');
+        state.annotations = [];
+        updateCount();
+      });
+
+      video.addEventListener('loadedmetadata', () => {
+        setCanvasSize();
+        render();
+      });
+
+      playPause.addEventListener('click', () => {
+        if (!video.src) return;
+        if (state.isPlaying) {
+          video.pause();
+          playPause.textContent = 'Play';
+        } else {
+          video.play();
+          playPause.textContent = 'Pause';
+        }
+        state.isPlaying = !state.isPlaying;
+      });
+
+      video.addEventListener('play', () => {
+        if (rafId) cancelAnimationFrame(rafId);
+        loop();
+      });
+
+      video.addEventListener('pause', () => {
+        if (rafId) cancelAnimationFrame(rafId);
+      });
+
+      clearAll.addEventListener('click', () => {
+        state.annotations = [];
+        state.current = null;
+        updateCount();
+        render();
+      });
+
+      trackingToggle.addEventListener('click', () => {
+        state.trackingEnabled = !state.trackingEnabled;
+        trackingLabel.textContent = state.trackingEnabled ? 'Tracking Active (demo)' : 'Tracking Disabled (demo)';
+        trackingToggle.classList.toggle('active', state.trackingEnabled);
+      });
+
+      trackingReset.addEventListener('click', () => {
+        trackingLabel.textContent = 'Tracking Active (demo)';
+        state.trackingEnabled = true;
+      });
+
+      document.querySelectorAll('.tool-btn').forEach(btn => {
+        btn.addEventListener('click', () => setTool(btn.dataset.tool));
+      });
+
+      document.querySelectorAll('.swatch').forEach(swatch => {
+        swatch.addEventListener('click', () => setColor(swatch.dataset.color));
+      });
+
+      overlay.addEventListener('mousedown', startDraw);
+      overlay.addEventListener('mousemove', moveDraw);
+      overlay.addEventListener('mouseup', endDraw);
+      overlay.addEventListener('mouseleave', endDraw);
+
+      updateCount();
+      render();
+      loop();
+    });
+  </script>
+</body>
+</html>
